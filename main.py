@@ -18,7 +18,7 @@ threshold = meta['threshold']
 
 # Load dataset
 df = pd.read_csv('FINAL_DATASET_WITH_ROLLING.csv')
-df['DATETIME'] = pd.to_datetime(df['DATETIME'], dayfirst=True)
+df['DATETIME'] = pd.to_datetime(df['DATETIME'], dayfirst=True, errors='coerce')
 
 class InputData(BaseModel):
     rain_lag_1hr: float
