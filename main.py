@@ -131,7 +131,7 @@ def get_trend(year: int, month: int):
                 })
     return {"trend": results}
 
-    @app.get("/latest")
+@app.get("/latest")
 def get_latest():
     latest = df.sort_values(['YEAR', 'MO', 'DY', 'HR']).iloc[-1]
     rpi = float(latest['RPI'])
