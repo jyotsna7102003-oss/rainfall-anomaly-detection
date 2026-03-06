@@ -1,0 +1,1 @@
+{"feature_cols": ["rain_lag_1hr", "rain_lag_3hr", "rain_lag_6hr", "rain_lag_24hr", "rain_roll_3", "rain_roll_6", "rain_roll_24", "soil_root_roll_6", "soil_root_roll_24", "temp_roll_6", "temp_roll_24"], "threshold": 0.836463366972416}
