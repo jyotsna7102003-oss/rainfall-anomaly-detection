@@ -4,10 +4,10 @@ from pydantic import BaseModel
 import joblib, json
 import numpy as np
 import pandas as pd
+import requests
 
 app = FastAPI()
 
-# Add CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,6 +30,10 @@ threshold = meta['threshold']
 df = pd.read_csv('FINAL_DATASET_WITH_ROLLING.csv')
 df['DATETIME'] = pd.to_datetime(df['DATETIME'], dayfirst=True, errors='coerce')
 
+# Coimbatore coordinates
+LAT = 11.0168
+LON = 76.9558
+
 class InputData(BaseModel):
     rain_lag_1hr: float
     rain_lag_3hr: float
@@ -42,6 +46,48 @@ class InputData(BaseModel):
     soil_root_roll_24: float
     temp_roll_6: float
     temp_roll_24: float
+
+def fetch_openmeteo():
+    url = (
+        f"https://api.open-meteo.com/v1/forecast"
+        f"?latitude={LAT}&longitude={LON}"
+        f"&hourly=precipitation,temperature_2m,soil_moisture_0_to_7cm"
+        f"&past_days=2&forecast_days=1"
+        f"&timezone=Asia/Kolkata"
+    )
+    response = requests.get(url)
+    data = response.json()
+    hourly = data['hourly']
+    df_live = pd.DataFrame({
+        'time': pd.to_datetime(hourly['time']),
+        'rain': hourly['precipitation'],
+        'temp': hourly['temperature_2m'],
+        'soil': hourly['soil_moisture_0_to_7cm']
+    })
+    df_live = df_live.dropna()
+    return df_live
+
+def compute_features(df_live):
+    # Get last 24 hours of data
+    latest = df_live.iloc[-1]
+    rain = df_live['rain']
+    temp = df_live['temp']
+    soil = df_live['soil']
+
+    features = {
+        'rain_lag_1hr': float(rain.iloc[-2]) if len(rain) >= 2 else 0.0,
+        'rain_lag_3hr': float(rain.iloc[-4]) if len(rain) >= 4 else 0.0,
+        'rain_lag_6hr': float(rain.iloc[-7]) if len(rain) >= 7 else 0.0,
+        'rain_lag_24hr': float(rain.iloc[-25]) if len(rain) >= 25 else 0.0,
+        'rain_roll_3': float(rain.iloc[-3:].mean()),
+        'rain_roll_6': float(rain.iloc[-6:].mean()),
+        'rain_roll_24': float(rain.iloc[-24:].mean()),
+        'soil_root_roll_6': float(soil.iloc[-6:].mean()),
+        'soil_root_roll_24': float(soil.iloc[-24:].mean()),
+        'temp_roll_6': float(temp.iloc[-6:].mean()),
+        'temp_roll_24': float(temp.iloc[-24:].mean()),
+    }
+    return features, latest
 
 @app.get("/")
 def home():
@@ -73,6 +119,36 @@ def predict(data: InputData):
         "anomaly_code": anomaly_code,
         "threshold": round(threshold, 4)
     }
+
+@app.get("/live")
+def get_live():
+    try:
+        df_live = fetch_openmeteo()
+        features, latest = compute_features(df_live)
+        feat_array = [[features[f] for f in feature_cols]]
+        rf_pred = rf_model.predict(feat_array)[0]
+        gb_pred = gb_model.predict(feat_array)[0]
+        rpi = 0.6 * rf_pred + 0.4 * gb_pred
+        if rpi > threshold:
+            anomaly = "Heavy Rain ⚠️"
+            anomaly_code = 1
+        elif rpi < -threshold:
+            anomaly = "Low Rain 🔵"
+            anomaly_code = -1
+        else:
+            anomaly = "Normal ✅"
+            anomaly_code = 0
+        return {
+            "time": str(latest['time']),
+            "avg_rain": round(float(latest['rain']), 2),
+            "avg_temp": round(float(latest['temp']), 2),
+            "rpi": round(float(rpi), 4),
+            "anomaly": anomaly,
+            "anomaly_code": anomaly_code,
+            "source": "Live - Open-Meteo"
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/calendar/{year}/{month}")
 def get_calendar(year: int, month: int):
