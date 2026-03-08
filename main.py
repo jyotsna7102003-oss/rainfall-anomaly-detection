@@ -335,3 +335,43 @@ def get_latest():
         "anomaly": anomaly,
         "anomaly_code": anomaly_code
     }
+    @app.get("/forecast2026")
+def get_forecast_2026():
+    try:
+        results = []
+        for month in range(1, 13):
+            monthly = df[df['MO'] == month]
+            if monthly.empty:
+                continue
+            avg_rain = float(monthly['PRECTOTCORR'].mean())
+            avg_temp = float(monthly['T2M'].mean())
+            avg_soil = float(monthly['GWETROOT'].mean())
+
+            features = {
+                'rain_lag_1hr':      avg_rain,
+                'rain_lag_3hr':      avg_rain,
+                'rain_lag_6hr':      avg_rain,
+                'rain_lag_24hr':     avg_rain,
+                'rain_roll_3':       avg_rain,
+                'rain_roll_6':       avg_rain,
+                'rain_roll_24':      avg_rain,
+                'soil_root_roll_6':  avg_soil,
+                'soil_root_roll_24': avg_soil,
+                'temp_roll_6':       avg_temp,
+                'temp_roll_24':      avg_temp,
+            }
+            feat_array = [[features[f] for f in feature_cols]]
+            rpi = 0.6 * rf_model.predict(feat_array)[0] + 0.4 * gb_model.predict(feat_array)[0]
+            anomaly, anomaly_code = get_anomaly(rpi)
+
+            results.append({
+                "month": month,
+                "anomaly": anomaly,
+                "anomaly_code": anomaly_code,
+                "rpi": round(float(rpi), 4),
+                "avg_rain": round(avg_rain, 2),
+                "avg_temp": round(avg_temp, 2),
+            })
+        return {"year": 2026, "predictions": results}
+    except Exception as e:
+        return {"error": str(e)}
