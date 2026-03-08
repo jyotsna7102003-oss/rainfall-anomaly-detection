@@ -68,24 +68,27 @@ def fetch_openmeteo():
     return df_live
 
 def compute_features(df_live):
-    # Get last 24 hours of data
     latest = df_live.iloc[-1]
-    rain = df_live['rain']
-    temp = df_live['temp']
-    soil = df_live['soil']
+    rain = df_live['rain'].reset_index(drop=True)
+    temp = df_live['temp'].reset_index(drop=True)
+    soil = df_live['soil'].reset_index(drop=True)
+    n = len(rain)
+
+    def safe_get(series, idx):
+        return float(series.iloc[idx]) if abs(idx) <= len(series) else 0.0
 
     features = {
-        'rain_lag_1hr': float(rain.iloc[-2]) if len(rain) >= 2 else 0.0,
-        'rain_lag_3hr': float(rain.iloc[-4]) if len(rain) >= 4 else 0.0,
-        'rain_lag_6hr': float(rain.iloc[-7]) if len(rain) >= 7 else 0.0,
-        'rain_lag_24hr': float(rain.iloc[-25]) if len(rain) >= 25 else 0.0,
-        'rain_roll_3': float(rain.iloc[-3:].mean()),
-        'rain_roll_6': float(rain.iloc[-6:].mean()),
-        'rain_roll_24': float(rain.iloc[-24:].mean()),
-        'soil_root_roll_6': float(soil.iloc[-6:].mean()),
-        'soil_root_roll_24': float(soil.iloc[-24:].mean()),
-        'temp_roll_6': float(temp.iloc[-6:].mean()),
-        'temp_roll_24': float(temp.iloc[-24:].mean()),
+        'rain_lag_1hr':   safe_get(rain, -2),
+        'rain_lag_3hr':   safe_get(rain, -4),
+        'rain_lag_6hr':   safe_get(rain, -7),
+        'rain_lag_24hr':  safe_get(rain, -25),
+        'rain_roll_3':    float(rain.iloc[-min(3,n):].mean()),
+        'rain_roll_6':    float(rain.iloc[-min(6,n):].mean()),
+        'rain_roll_24':   float(rain.iloc[-min(24,n):].mean()),
+        'soil_root_roll_6':  float(soil.iloc[-min(6,n):].mean()),
+        'soil_root_roll_24': float(soil.iloc[-min(24,n):].mean()),
+        'temp_roll_6':    float(temp.iloc[-min(6,n):].mean()),
+        'temp_roll_24':   float(temp.iloc[-min(24,n):].mean()),
     }
     return features, latest
 
