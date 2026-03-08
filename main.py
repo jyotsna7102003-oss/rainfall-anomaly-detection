@@ -75,20 +75,23 @@ def compute_features(df_live):
     n = len(rain)
 
     def safe_get(series, idx):
-        return float(series.iloc[idx]) if abs(idx) <= len(series) else 0.0
+        try:
+            return float(series.iloc[idx])
+        except:
+            return 0.0
 
     features = {
-        'rain_lag_1hr':   safe_get(rain, -2),
-        'rain_lag_3hr':   safe_get(rain, -4),
-        'rain_lag_6hr':   safe_get(rain, -7),
-        'rain_lag_24hr':  safe_get(rain, -25),
-        'rain_roll_3':    float(rain.iloc[-min(3,n):].mean()),
-        'rain_roll_6':    float(rain.iloc[-min(6,n):].mean()),
-        'rain_roll_24':   float(rain.iloc[-min(24,n):].mean()),
+        'rain_lag_1hr':      safe_get(rain, -2),
+        'rain_lag_3hr':      safe_get(rain, -4),
+        'rain_lag_6hr':      safe_get(rain, -7),
+        'rain_lag_24hr':     safe_get(rain, -25),
+        'rain_roll_3':       float(rain.iloc[-min(3,n):].mean()),
+        'rain_roll_6':       float(rain.iloc[-min(6,n):].mean()),
+        'rain_roll_24':      float(rain.iloc[-min(24,n):].mean()),
         'soil_root_roll_6':  float(soil.iloc[-min(6,n):].mean()),
         'soil_root_roll_24': float(soil.iloc[-min(24,n):].mean()),
-        'temp_roll_6':    float(temp.iloc[-min(6,n):].mean()),
-        'temp_roll_24':   float(temp.iloc[-min(24,n):].mean()),
+        'temp_roll_6':       float(temp.iloc[-min(6,n):].mean()),
+        'temp_roll_24':      float(temp.iloc[-min(24,n):].mean()),
     }
     return features, latest
 
