@@ -64,12 +64,11 @@ def fetch_openmeteo():
         'temp': hourly['temperature_2m'],
         'soil': hourly['soil_moisture_0_to_7cm']
     })
-    # Fill nulls instead of dropping
     df_live['rain'] = df_live['rain'].fillna(0.0)
-    df_live['temp'] = df_live['temp'].fillna(method='ffill').fillna(25.0)
-    df_live['soil'] = df_live['soil'].fillna(method='ffill').fillna(0.5)
+    df_live['temp'] = df_live['temp'].ffill().fillna(25.0)
+    df_live['soil'] = df_live['soil'].ffill().fillna(0.5)
     return df_live
-    
+
 
 def compute_features(df_live):
     latest = df_live.iloc[-1]
