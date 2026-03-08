@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from datetime import datetime, timedelta
 import joblib, json
 import numpy as np
 import pandas as pd
@@ -16,7 +17,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load models
 rf_model = joblib.load('rf_model.pkl')
 gb_model = joblib.load('gb_model.pkl')
 
@@ -26,13 +26,12 @@ with open('model_meta.json') as f:
 feature_cols = meta['feature_cols']
 threshold = meta['threshold']
 
-# Load dataset
 df = pd.read_csv('FINAL_DATASET_WITH_ROLLING.csv')
 df['DATETIME'] = pd.to_datetime(df['DATETIME'], dayfirst=True, errors='coerce')
 
-# Coimbatore coordinates
 LAT = 11.0168
 LON = 76.9558
+
 
 class InputData(BaseModel):
     rain_lag_1hr: float
@@ -47,12 +46,13 @@ class InputData(BaseModel):
     temp_roll_6: float
     temp_roll_24: float
 
-def fetch_openmeteo():
+
+def fetch_openmeteo(forecast_days=1):
     url = (
         f"https://api.open-meteo.com/v1/forecast"
         f"?latitude={LAT}&longitude={LON}"
         f"&hourly=precipitation,temperature_2m,soil_moisture_0_to_7cm"
-        f"&past_days=2&forecast_days=1"
+        f"&past_days=2&forecast_days={forecast_days}"
         f"&timezone=Asia/Kolkata"
     )
     response = requests.get(url)
@@ -88,19 +88,35 @@ def compute_features(df_live):
         'rain_lag_3hr':      safe_get(rain, -4),
         'rain_lag_6hr':      safe_get(rain, -7),
         'rain_lag_24hr':     safe_get(rain, -25),
-        'rain_roll_3':       float(rain.iloc[-min(3,n):].mean()),
-        'rain_roll_6':       float(rain.iloc[-min(6,n):].mean()),
-        'rain_roll_24':      float(rain.iloc[-min(24,n):].mean()),
-        'soil_root_roll_6':  float(soil.iloc[-min(6,n):].mean()),
-        'soil_root_roll_24': float(soil.iloc[-min(24,n):].mean()),
-        'temp_roll_6':       float(temp.iloc[-min(6,n):].mean()),
-        'temp_roll_24':      float(temp.iloc[-min(24,n):].mean()),
+        'rain_roll_3':       float(rain.iloc[-min(3, n):].mean()),
+        'rain_roll_6':       float(rain.iloc[-min(6, n):].mean()),
+        'rain_roll_24':      float(rain.iloc[-min(24, n):].mean()),
+        'soil_root_roll_6':  float(soil.iloc[-min(6, n):].mean()),
+        'soil_root_roll_24': float(soil.iloc[-min(24, n):].mean()),
+        'temp_roll_6':       float(temp.iloc[-min(6, n):].mean()),
+        'temp_roll_24':      float(temp.iloc[-min(24, n):].mean()),
     }
     return features, latest
+
+
+def get_anomaly(rpi):
+    if rpi > threshold:
+        return "Heavy Rain ⚠️", 1
+    elif rpi < -threshold:
+        return "Low Rain 🔵", -1
+    return "Normal ✅", 0
+
+
+def predict_rpi(features):
+    feat_array = [[features[f] for f in feature_cols]]
+    rpi = 0.6 * rf_model.predict(feat_array)[0] + 0.4 * gb_model.predict(feat_array)[0]
+    return float(rpi)
+
 
 @app.get("/")
 def home():
     return {"status": "Rainfall Anomaly Detection API is running!"}
+
 
 @app.post("/predict")
 def predict(data: InputData):
@@ -113,15 +129,7 @@ def predict(data: InputData):
     rf_pred = rf_model.predict(features)[0]
     gb_pred = gb_model.predict(features)[0]
     rpi = 0.6 * rf_pred + 0.4 * gb_pred
-    if rpi > threshold:
-        anomaly = "Heavy Rain ⚠️"
-        anomaly_code = 1
-    elif rpi < -threshold:
-        anomaly = "Low Rain 🔵"
-        anomaly_code = -1
-    else:
-        anomaly = "Normal ✅"
-        anomaly_code = 0
+    anomaly, anomaly_code = get_anomaly(rpi)
     return {
         "rpi": round(float(rpi), 4),
         "anomaly": anomaly,
@@ -129,35 +137,124 @@ def predict(data: InputData):
         "threshold": round(threshold, 4)
     }
 
+
 @app.get("/live")
 def get_live():
     try:
-        df_live = fetch_openmeteo()
+        df_live = fetch_openmeteo(forecast_days=1)
         features, latest = compute_features(df_live)
-        feat_array = [[features[f] for f in feature_cols]]
-        rf_pred = rf_model.predict(feat_array)[0]
-        gb_pred = gb_model.predict(feat_array)[0]
-        rpi = 0.6 * rf_pred + 0.4 * gb_pred
-        if rpi > threshold:
-            anomaly = "Heavy Rain ⚠️"
-            anomaly_code = 1
-        elif rpi < -threshold:
-            anomaly = "Low Rain 🔵"
-            anomaly_code = -1
-        else:
-            anomaly = "Normal ✅"
-            anomaly_code = 0
+        rpi = predict_rpi(features)
+        anomaly, anomaly_code = get_anomaly(rpi)
         return {
             "time": str(latest['time']),
             "avg_rain": round(float(latest['rain']), 2),
             "avg_temp": round(float(latest['temp']), 2),
-            "rpi": round(float(rpi), 4),
+            "rpi": round(rpi, 4),
             "anomaly": anomaly,
             "anomaly_code": anomaly_code,
             "source": "Live - Open-Meteo"
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.get("/forecast")
+def get_forecast():
+    try:
+        today = datetime.now()
+        results = []
+
+        df_fc = fetch_openmeteo(forecast_days=7)
+        df_fc['date'] = df_fc['time'].dt.date
+
+        for date, group in df_fc.groupby('date'):
+            if pd.Timestamp(date) < pd.Timestamp(today.date()):
+                continue
+            group = group.reset_index(drop=True)
+            n = len(group)
+            rain = group['rain']
+            temp = group['temp']
+            soil = group['soil']
+
+            def safe_get(s, i):
+                try:
+                    return float(s.iloc[i])
+                except:
+                    return 0.0
+
+            features = {
+                'rain_lag_1hr':      safe_get(rain, -2),
+                'rain_lag_3hr':      safe_get(rain, -4),
+                'rain_lag_6hr':      safe_get(rain, -7),
+                'rain_lag_24hr':     safe_get(rain, -25),
+                'rain_roll_3':       float(rain.iloc[-min(3, n):].mean()),
+                'rain_roll_6':       float(rain.iloc[-min(6, n):].mean()),
+                'rain_roll_24':      float(rain.iloc[-min(24, n):].mean()),
+                'soil_root_roll_6':  float(soil.iloc[-min(6, n):].mean()),
+                'soil_root_roll_24': float(soil.iloc[-min(24, n):].mean()),
+                'temp_roll_6':       float(temp.iloc[-min(6, n):].mean()),
+                'temp_roll_24':      float(temp.iloc[-min(24, n):].mean()),
+            }
+
+            rpi = predict_rpi(features)
+            anomaly, anomaly_code = get_anomaly(rpi)
+
+            if anomaly_code != 0:
+                results.append({
+                    "date": str(date),
+                    "anomaly": anomaly,
+                    "anomaly_code": anomaly_code,
+                    "rpi": round(rpi, 4),
+                    "avg_rain": round(float(rain.mean()), 2),
+                    "avg_temp": round(float(temp.mean()), 2),
+                    "source": "7-day forecast"
+                })
+
+        for i in range(3):
+            future_date = today + timedelta(days=30 * (i + 1))
+            future_month = future_date.month
+            future_year = future_date.year
+
+            monthly = df[df['MO'] == future_month]
+            if monthly.empty:
+                continue
+
+            avg_rain = float(monthly['PRECTOTCORR'].mean())
+            avg_temp = float(monthly['T2M'].mean())
+            avg_soil = float(monthly['GWETROOT'].mean())
+
+            features = {
+                'rain_lag_1hr':      avg_rain,
+                'rain_lag_3hr':      avg_rain,
+                'rain_lag_6hr':      avg_rain,
+                'rain_lag_24hr':     avg_rain,
+                'rain_roll_3':       avg_rain,
+                'rain_roll_6':       avg_rain,
+                'rain_roll_24':      avg_rain,
+                'soil_root_roll_6':  avg_soil,
+                'soil_root_roll_24': avg_soil,
+                'temp_roll_6':       avg_temp,
+                'temp_roll_24':      avg_temp,
+            }
+
+            rpi = predict_rpi(features)
+            anomaly, anomaly_code = get_anomaly(rpi)
+
+            results.append({
+                "date": f"{future_year}-{future_month:02d}-01",
+                "anomaly": anomaly,
+                "anomaly_code": anomaly_code,
+                "rpi": round(rpi, 4),
+                "avg_rain": round(avg_rain, 2),
+                "avg_temp": round(avg_temp, 2),
+                "source": f"Historical avg for month {future_month}"
+            })
+
+        return {"forecast": results, "generated_at": str(today)}
+
+    except Exception as e:
+        return {"error": str(e)}
+
 
 @app.get("/calendar/{year}/{month}")
 def get_calendar(year: int, month: int):
@@ -185,6 +282,7 @@ def get_calendar(year: int, month: int):
         })
     return {"year": year, "month": month, "data": result}
 
+
 @app.get("/date/{year}/{month}/{day}")
 def get_date(year: int, month: int, day: int):
     filtered = df[(df['YEAR'] == year) & (df['MO'] == month) & (df['DY'] == day)]
@@ -196,12 +294,7 @@ def get_date(year: int, month: int, day: int):
         avg_rpi=('RPI', 'mean')
     )
     rpi = float(avg['avg_rpi'])
-    if rpi > 0.8365:
-        anomaly = "Heavy Rain ⚠️"
-    elif rpi < -0.8365:
-        anomaly = "Low Rain 🔵"
-    else:
-        anomaly = "Normal ✅"
+    anomaly, _ = get_anomaly(rpi)
     return {
         "date": f"{day}/{month}/{year}",
         "avg_rain": round(float(avg['avg_rain']), 2),
@@ -209,6 +302,7 @@ def get_date(year: int, month: int, day: int):
         "avg_rpi": round(rpi, 4),
         "anomaly": anomaly
     }
+
 
 @app.get("/trend/{year}/{month}")
 def get_trend(year: int, month: int):
@@ -226,19 +320,12 @@ def get_trend(year: int, month: int):
                 })
     return {"trend": results}
 
+
 @app.get("/latest")
 def get_latest():
     latest = df.sort_values(['YEAR', 'MO', 'DY', 'HR']).iloc[-1]
     rpi = float(latest['RPI'])
-    if rpi > threshold:
-        anomaly = "Heavy Rain ⚠️"
-        anomaly_code = 1
-    elif rpi < -threshold:
-        anomaly = "Low Rain 🔵"
-        anomaly_code = -1
-    else:
-        anomaly = "Normal ✅"
-        anomaly_code = 0
+    anomaly, anomaly_code = get_anomaly(rpi)
     return {
         "date": f"{int(latest['DY'])}/{int(latest['MO'])}/{int(latest['YEAR'])}",
         "hour": int(latest['HR']),
@@ -248,138 +335,3 @@ def get_latest():
         "anomaly": anomaly,
         "anomaly_code": anomaly_code
     }
-
-    @app.get("/forecast")
-def get_forecast():
-    try:
-        from datetime import datetime, timedelta
-        today = datetime.now()
-        results = []
-
-        # --- Part 1: Next 7 days using Open-Meteo forecast ---
-        url = (
-            f"https://api.open-meteo.com/v1/forecast"
-            f"?latitude={LAT}&longitude={LON}"
-            f"&hourly=precipitation,temperature_2m,soil_moisture_0_to_7cm"
-            f"&past_days=2&forecast_days=7"
-            f"&timezone=Asia/Kolkata"
-        )
-        response = requests.get(url)
-        data = response.json()
-        hourly = data['hourly']
-        df_fc = pd.DataFrame({
-            'time': pd.to_datetime(hourly['time']),
-            'rain': hourly['precipitation'],
-            'temp': hourly['temperature_2m'],
-            'soil': hourly['soil_moisture_0_to_7cm']
-        })
-        df_fc['rain'] = df_fc['rain'].fillna(0.0)
-        df_fc['temp'] = df_fc['temp'].ffill().fillna(25.0)
-        df_fc['soil'] = df_fc['soil'].ffill().fillna(0.5)
-
-        # Group by day and predict
-        df_fc['date'] = df_fc['time'].dt.date
-        for date, group in df_fc.groupby('date'):
-            if pd.Timestamp(date) < pd.Timestamp(today.date()):
-                continue
-            group = group.reset_index(drop=True)
-            n = len(group)
-            rain = group['rain']
-            temp = group['temp']
-            soil = group['soil']
-
-            def safe_get(s, i):
-                try: return float(s.iloc[i])
-                except: return 0.0
-
-            features = {
-                'rain_lag_1hr': safe_get(rain, -2),
-                'rain_lag_3hr': safe_get(rain, -4),
-                'rain_lag_6hr': safe_get(rain, -7),
-                'rain_lag_24hr': safe_get(rain, -25),
-                'rain_roll_3': float(rain.iloc[-min(3,n):].mean()),
-                'rain_roll_6': float(rain.iloc[-min(6,n):].mean()),
-                'rain_roll_24': float(rain.iloc[-min(24,n):].mean()),
-                'soil_root_roll_6': float(soil.iloc[-min(6,n):].mean()),
-                'soil_root_roll_24': float(soil.iloc[-min(24,n):].mean()),
-                'temp_roll_6': float(temp.iloc[-min(6,n):].mean()),
-                'temp_roll_24': float(temp.iloc[-min(24,n):].mean()),
-            }
-            feat_array = [[features[f] for f in feature_cols]]
-            rpi = 0.6 * rf_model.predict(feat_array)[0] + 0.4 * gb_model.predict(feat_array)[0]
-
-            if rpi > threshold:
-                results.append({
-                    "date": str(date),
-                    "anomaly": "Heavy Rain ⚠️",
-                    "anomaly_code": 1,
-                    "rpi": round(float(rpi), 4),
-                    "avg_rain": round(float(rain.mean()), 2),
-                    "avg_temp": round(float(temp.mean()), 2),
-                    "source": "7-day forecast"
-                })
-            elif rpi < -threshold:
-                results.append({
-                    "date": str(date),
-                    "anomaly": "Low Rain 🔵",
-                    "anomaly_code": -1,
-                    "rpi": round(float(rpi), 4),
-                    "avg_rain": round(float(rain.mean()), 2),
-                    "avg_temp": round(float(temp.mean()), 2),
-                    "source": "7-day forecast"
-                })
-
-        # --- Part 2: Next 3 months using historical averages ---
-        for i in range(3):
-            future_date = today + timedelta(days=30 * (i + 1))
-            future_month = future_date.month
-            future_year = future_date.year
-
-            monthly = df[df['MO'] == future_month]
-            if monthly.empty:
-                continue
-
-            avg_rain = float(monthly['PRECTOTCORR'].mean())
-            avg_temp = float(monthly['T2M'].mean())
-            avg_soil = float(monthly['GWETROOT'].mean())
-
-            features = {
-                'rain_lag_1hr': avg_rain,
-                'rain_lag_3hr': avg_rain,
-                'rain_lag_6hr': avg_rain,
-                'rain_lag_24hr': avg_rain,
-                'rain_roll_3': avg_rain,
-                'rain_roll_6': avg_rain,
-                'rain_roll_24': avg_rain,
-                'soil_root_roll_6': avg_soil,
-                'soil_root_roll_24': avg_soil,
-                'temp_roll_6': avg_temp,
-                'temp_roll_24': avg_temp,
-            }
-            feat_array = [[features[f] for f in feature_cols]]
-            rpi = 0.6 * rf_model.predict(feat_array)[0] + 0.4 * gb_model.predict(feat_array)[0]
-
-            if rpi > threshold:
-                anomaly = "Heavy Rain ⚠️"
-                code = 1
-            elif rpi < -threshold:
-                anomaly = "Low Rain 🔵"
-                code = -1
-            else:
-                anomaly = "Normal ✅"
-                code = 0
-
-            results.append({
-                "date": f"{future_year}-{future_month:02d}-01",
-                "anomaly": anomaly,
-                "anomaly_code": code,
-                "rpi": round(float(rpi), 4),
-                "avg_rain": round(avg_rain, 2),
-                "avg_temp": round(avg_temp, 2),
-                "source": f"Historical avg for month {future_month}"
-            })
-
-        return {"forecast": results, "generated_at": str(today)}
-
-    except Exception as e:
-        return {"error": str(e)}
