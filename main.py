@@ -48,12 +48,17 @@ class InputData(BaseModel):
 
 
 def fetch_openmeteo(forecast_days=1):
+    # Use archive API as fallback - no rate limits
+    from datetime import date, timedelta
+    today = date.today()
+    start = today - timedelta(days=3)
+    
     params = {
         "latitude": LAT,
         "longitude": LON,
-        "hourly": "precipitation,temperature_2m",
-        "past_days": 2,
-        "forecast_days": forecast_days,
+        "daily": "precipitation_sum,temperature_2m_max,temperature_2m_min",
+        "start_date": start.strftime("%Y-%m-%d"),
+        "end_date": today.strftime("%Y-%m-%d"),
         "timezone": "Asia/Kolkata"
     }
     response = requests.get(
@@ -63,23 +68,31 @@ def fetch_openmeteo(forecast_days=1):
     )
     data = response.json()
 
-    if 'hourly' not in data:
-        raise Exception(f"Open-Meteo API error: {data}")
+    if 'daily' not in data:
+        raise Exception(f"Open-Meteo error: {data}")
 
-    hourly = data['hourly']
-
+    daily = data['daily']
     df_live = pd.DataFrame({
-        'time': pd.to_datetime(hourly['time']),
-        'rain': hourly['precipitation'],
-        'temp': hourly['temperature_2m'],
-        'soil': [0.3] * len(hourly['time'])  # fixed fallback value
+        'time': pd.to_datetime(daily['time']),
+        'rain': daily['precipitation_sum'],
+        'temp': [
+            (mx + mn) / 2
+            for mx, mn in zip(
+                daily['temperature_2m_max'],
+                daily['temperature_2m_min']
+            )
+        ],
+        'soil': [0.3] * len(daily['time'])
     })
 
-    df_live['rain'] = df_live['rain'].fillna(0.0)
-    df_live['temp'] = df_live['temp'].ffill().fillna(25.0)
+    df_live['rain'] = pd.to_numeric(
+        df_live['rain'], errors='coerce').fillna(0.0)
+    df_live['temp'] = pd.to_numeric(
+        df_live['temp'], errors='coerce').ffill().fillna(25.0)
     df_live['soil'] = df_live['soil'].fillna(0.3)
 
     return df_live
+
 
 
 def compute_features(df_live):
@@ -151,29 +164,23 @@ def predict(data: InputData):
 
 
 @app.get("/live")
-@app.get("/live")
 def get_live():
     try:
-        params = {
-            "latitude": LAT,
-            "longitude": LON,
-            "hourly": "precipitation,temperature_2m",
-            "past_days": 2,
-            "forecast_days": 1,
-            "timezone": "Asia/Kolkata"
+        df_live = fetch_openmeteo(forecast_days=1)
+        features, latest = compute_features(df_live)
+        rpi = predict_rpi(features)
+        anomaly, anomaly_code = get_anomaly(rpi)
+        return {
+            "time": str(latest['time']),
+            "avg_rain": round(float(latest['rain']), 2),
+            "avg_temp": round(float(latest['temp']), 2),
+            "rpi": round(rpi, 4),
+            "anomaly": anomaly,
+            "anomaly_code": anomaly_code,
+            "source": "Live - Open-Meteo Daily"
         }
-        response = requests.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params=params,
-            timeout=15
-        )
-        raw = response.json()
-        
-        # Return raw response so we can see what's happening
-        return {"debug_raw": raw}
-        
     except Exception as e:
-        return {"error": str(e), "type": type(e).__name__}
+        return {"error": str(e)}
 
 
 @app.get("/forecast")
