@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime, timedelta
+import calendar as cal
 import joblib, json
 import numpy as np
 import pandas as pd
@@ -56,12 +57,12 @@ def get_anomaly(rpi):
 
 def predict_rpi(features):
     feat_array = [[features[f] for f in feature_cols]]
-    rpi = 0.6 * rf_model.predict(feat_array)[0] + 0.4 * gb_model.predict(feat_array)[0]
+    rpi = 0.6 * rf_model.predict(feat_array)[0] + \
+          0.4 * gb_model.predict(feat_array)[0]
     return float(rpi)
 
 
 def get_features_from_row(row):
-    """Build feature dict from a dataset row using rolling columns"""
     features = {}
     for f in feature_cols:
         if f in row.index:
@@ -69,6 +70,51 @@ def get_features_from_row(row):
         else:
             features[f] = 0.0
     return features
+
+
+def predict_day(month, day):
+    """Predict RPI for a specific month/day using historical averages"""
+    day_hist = df[(df['MO'] == month) & (df['DY'] == day)]
+    if not day_hist.empty:
+        avg_rain = float(day_hist['PRECTOTCORR'].mean())
+        avg_temp = float(day_hist['T2M'].mean())
+        avg_soil = float(day_hist['GWETROOT'].mean())
+    else:
+        monthly = df[df['MO'] == month]
+        avg_rain = float(monthly['PRECTOTCORR'].mean()) if not monthly.empty else 0.0
+        avg_temp = float(monthly['T2M'].mean()) if not monthly.empty else 25.0
+        avg_soil = float(monthly['GWETROOT'].mean()) if not monthly.empty else 0.3
+
+    features = {
+        'rain_lag_1hr':      avg_rain,
+        'rain_lag_3hr':      avg_rain,
+        'rain_lag_6hr':      avg_rain,
+        'rain_lag_24hr':     avg_rain,
+        'rain_roll_3':       avg_rain,
+        'rain_roll_6':       avg_rain,
+        'rain_roll_24':      avg_rain,
+        'soil_root_roll_6':  avg_soil,
+        'soil_root_roll_24': avg_soil,
+        'temp_roll_6':       avg_temp,
+        'temp_roll_24':      avg_temp,
+    }
+    rpi = predict_rpi(features)
+    anomaly, anomaly_code = get_anomaly(rpi)
+
+    if rpi > threshold:
+        anomaly_str = "heavy"
+    elif rpi < -threshold:
+        anomaly_str = "low"
+    else:
+        anomaly_str = "normal"
+
+    return {
+        "avg_rain": round(avg_rain, 2),
+        "avg_temp": round(avg_temp, 2),
+        "avg_rpi": round(rpi, 4),
+        "anomaly": anomaly_str,
+        "anomaly_code": anomaly_code,
+    }
 
 
 @app.get("/")
@@ -79,9 +125,9 @@ def home():
 @app.post("/predict")
 def predict(data: InputData):
     features = [[
-        data.rain_lag_1hr, data.rain_lag_3hr, data.rain_lag_6hr, data.rain_lag_24hr,
-        data.rain_roll_3, data.rain_roll_6, data.rain_roll_24,
-        data.soil_root_roll_6, data.soil_root_roll_24,
+        data.rain_lag_1hr, data.rain_lag_3hr, data.rain_lag_6hr,
+        data.rain_lag_24hr, data.rain_roll_3, data.rain_roll_6,
+        data.rain_roll_24, data.soil_root_roll_6, data.soil_root_roll_24,
         data.temp_roll_6, data.temp_roll_24
     ]]
     rf_pred = rf_model.predict(features)[0]
@@ -99,7 +145,6 @@ def predict(data: InputData):
 @app.get("/live")
 def get_live():
     try:
-        # Use latest row from dataset — no external API needed
         latest = df.sort_values(['YEAR', 'MO', 'DY', 'HR']).iloc[-1]
         features = get_features_from_row(latest)
         rpi = predict_rpi(features)
@@ -123,11 +168,12 @@ def get_forecast():
         today = datetime.now()
         results = []
 
-        # Use last 7 days from dataset
+        # Last 7 days from dataset
         sorted_df = df.sort_values(['YEAR', 'MO', 'DY', 'HR'])
-        last_7_days = sorted_df.groupby(['YEAR', 'MO', 'DY']).last().tail(7).reset_index()
+        last_7 = sorted_df.groupby(
+            ['YEAR', 'MO', 'DY']).last().tail(7).reset_index()
 
-        for _, row in last_7_days.iterrows():
+        for _, row in last_7.iterrows():
             features = get_features_from_row(row)
             rpi = predict_rpi(features)
             anomaly, anomaly_code = get_anomaly(rpi)
@@ -142,20 +188,17 @@ def get_forecast():
                     "source": "Dataset recent"
                 })
 
-        # Next 3 months forecast using historical averages
+        # Next 3 months ML forecast
         for i in range(3):
             future_date = today + timedelta(days=30 * (i + 1))
             future_month = future_date.month
             future_year = future_date.year
-
             monthly = df[df['MO'] == future_month]
             if monthly.empty:
                 continue
-
             avg_rain = float(monthly['PRECTOTCORR'].mean())
             avg_temp = float(monthly['T2M'].mean())
             avg_soil = float(monthly['GWETROOT'].mean())
-
             features = {
                 'rain_lag_1hr':      avg_rain,
                 'rain_lag_3hr':      avg_rain,
@@ -169,10 +212,8 @@ def get_forecast():
                 'temp_roll_6':       avg_temp,
                 'temp_roll_24':      avg_temp,
             }
-
             rpi = predict_rpi(features)
             anomaly, anomaly_code = get_anomaly(rpi)
-
             results.append({
                 "date": f"{future_year}-{future_month:02d}-01",
                 "anomaly": anomaly,
@@ -180,11 +221,10 @@ def get_forecast():
                 "rpi": round(rpi, 4),
                 "avg_rain": round(avg_rain, 2),
                 "avg_temp": round(avg_temp, 2),
-                "source": f"Historical avg for month {future_month}"
+                "source": f"ML prediction for month {future_month}"
             })
 
         return {"forecast": results, "generated_at": str(today)}
-
     except Exception as e:
         return {"error": str(e)}
 
@@ -232,30 +272,48 @@ def get_forecast_2026():
 def get_calendar(year: int, month: int):
     try:
         filtered = df[(df['YEAR'] == year) & (df['MO'] == month)]
-        if filtered.empty:
-            return {"year": year, "month": month, "data": []}
-        daily = filtered.groupby('DY').agg(
-            avg_rain=('PRECTOTCORR', 'mean'),
-            avg_temp=('T2M', 'mean'),
-            avg_rpi=('RPI', 'mean')
-        ).reset_index()
+
+        # Real data exists
+        if not filtered.empty:
+            daily = filtered.groupby('DY').agg(
+                avg_rain=('PRECTOTCORR', 'mean'),
+                avg_temp=('T2M', 'mean'),
+                avg_rpi=('RPI', 'mean')
+            ).reset_index()
+            result = []
+            for _, row in daily.iterrows():
+                rpi = row['avg_rpi']
+                if rpi > threshold:
+                    anomaly = "heavy"
+                elif rpi < -threshold:
+                    anomaly = "low"
+                else:
+                    anomaly = "normal"
+                result.append({
+                    "day": int(row['DY']),
+                    "avg_rain": round(float(row['avg_rain']), 2),
+                    "avg_temp": round(float(row['avg_temp']), 2),
+                    "avg_rpi": round(float(rpi), 4),
+                    "anomaly": anomaly,
+                    "source": "Historical Data"
+                })
+            return {"year": year, "month": month, "data": result}
+
+        # No real data — use ML prediction (e.g. 2026)
+        days_in_month = cal.monthrange(year, month)[1]
         result = []
-        for _, row in daily.iterrows():
-            rpi = row['avg_rpi']
-            if rpi > threshold:
-                anomaly = "heavy"
-            elif rpi < -threshold:
-                anomaly = "low"
-            else:
-                anomaly = "normal"
+        for day in range(1, days_in_month + 1):
+            prediction = predict_day(month, day)
             result.append({
-                "day": int(row['DY']),
-                "avg_rain": round(float(row['avg_rain']), 2),
-                "avg_temp": round(float(row['avg_temp']), 2),
-                "avg_rpi": round(float(rpi), 4),
-                "anomaly": anomaly
+                "day": day,
+                "avg_rain": prediction["avg_rain"],
+                "avg_temp": prediction["avg_temp"],
+                "avg_rpi": prediction["avg_rpi"],
+                "anomaly": prediction["anomaly"],
+                "source": "ML Prediction"
             })
         return {"year": year, "month": month, "data": result}
+
     except Exception as e:
         return {"error": str(e)}
 
@@ -268,19 +326,31 @@ def get_date(year: int, month: int, day: int):
             (df['MO'] == month) &
             (df['DY'] == day)
         ]
-        if filtered.empty:
-            return {"error": "No data for this date"}
-        avg_rain = float(filtered['PRECTOTCORR'].mean())
-        avg_temp = float(filtered['T2M'].mean())
-        avg_rpi = float(filtered['RPI'].mean())
-        anomaly, anomaly_code = get_anomaly(avg_rpi)
+        if not filtered.empty:
+            avg_rain = float(filtered['PRECTOTCORR'].mean())
+            avg_temp = float(filtered['T2M'].mean())
+            avg_rpi = float(filtered['RPI'].mean())
+            anomaly, anomaly_code = get_anomaly(avg_rpi)
+            return {
+                "date": f"{day}/{month}/{year}",
+                "avg_rain": round(avg_rain, 2),
+                "avg_temp": round(avg_temp, 2),
+                "avg_rpi": round(avg_rpi, 4),
+                "anomaly": anomaly,
+                "anomaly_code": anomaly_code,
+                "source": "Historical Data"
+            }
+        # No data — ML prediction
+        prediction = predict_day(month, day)
+        anomaly, anomaly_code = get_anomaly(prediction["avg_rpi"])
         return {
             "date": f"{day}/{month}/{year}",
-            "avg_rain": round(avg_rain, 2),
-            "avg_temp": round(avg_temp, 2),
-            "avg_rpi": round(avg_rpi, 4),
+            "avg_rain": prediction["avg_rain"],
+            "avg_temp": prediction["avg_temp"],
+            "avg_rpi": prediction["avg_rpi"],
             "anomaly": anomaly,
-            "anomaly_code": anomaly_code
+            "anomaly_code": anomaly_code,
+            "source": "ML Prediction"
         }
     except Exception as e:
         return {"error": str(e)}
@@ -298,6 +368,7 @@ def get_trend(year: int, month: int):
                 (df['MO'] == actual_month)
             ]
             if not filtered.empty:
+                # Real data
                 daily = filtered.groupby('DY').agg(
                     avg_rain=('PRECTOTCORR', 'mean'),
                     avg_rpi=('RPI', 'mean')
@@ -306,7 +377,19 @@ def get_trend(year: int, month: int):
                     results.append({
                         "label": f"{actual_year}-{actual_month:02d}-{int(row['DY']):02d}",
                         "rpi": round(float(row['avg_rpi']), 4),
-                        "avg_rain": round(float(row['avg_rain']), 2)
+                        "avg_rain": round(float(row['avg_rain']), 2),
+                        "source": "Historical"
+                    })
+            else:
+                # ML prediction per day
+                days_in_month = cal.monthrange(actual_year, actual_month)[1]
+                for day in range(1, days_in_month + 1):
+                    prediction = predict_day(actual_month, day)
+                    results.append({
+                        "label": f"{actual_year}-{actual_month:02d}-{day:02d}",
+                        "rpi": prediction["avg_rpi"],
+                        "avg_rain": prediction["avg_rain"],
+                        "source": "ML Prediction"
                     })
         return {"trend": results}
     except Exception as e:
